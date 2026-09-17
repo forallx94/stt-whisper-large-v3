@@ -1,0 +1,19 @@
+services:
+  stt:
+    build: .
+    image: stt-whisper-large-v3
+    volumes:
+      - ./app:/app:ro
+      - ./input:/audio:ro
+      - ./output:/output
+      - hf-cache:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
