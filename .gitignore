@@ -1,8 +1,13 @@
-# 입력 음성 파일과 전사 결과는 저장소에 포함하지 않습니다.
+# 음성 원본은 저장소에 포함하지 않습니다.
 /input/*
 !/input/.gitkeep
+
+# output/ 은 실행 산출물 전용 폴더입니다.
 /output/*
 !/output/.gitkeep
+
+# 원본 음성을 따로 보관할 때 쓰는 폴더(선택). 실수로 커밋되지 않도록 막아 둡니다.
+/archive/
 
 # Python
 __pycache__/

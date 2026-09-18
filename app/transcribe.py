@@ -1,6 +1,6 @@
 """Batch STT for the files in input/ using openai/whisper-large-v3.
 
-Writes two text files per input into output/:
+Writes two text files per input into output/_inbox/:
   <name>.txt            plain transcript
   <name>.segments.txt   same transcript with [hh:mm:ss] timestamps
 """
@@ -222,14 +222,18 @@ def main():
     args = ap.parse_args()
 
     outdir = Path(args.output)
-    outdir.mkdir(parents=True, exist_ok=True)
+    # 새 결과는 _inbox/ 에 쓴다. 정리해서 output/ 아래 다른 폴더로 옮겨도 재전사되지 않는다.
+    inbox = outdir / "_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
 
     files = find_audio(args.input, args.only)
     if not files:
         log(f"no audio files found in {args.input}")
         return 1
 
-    pending = [f for f in files if args.force or not (outdir / f"{f.stem}.txt").exists()]
+    # output/ 전체를 재귀로 훑는다. 정리되어 하위 폴더로 옮겨진 결과도 "이미 완료"로 인식한다.
+    done = {p.name[: -len(".segments.txt")] for p in outdir.rglob("*.segments.txt")}
+    pending = [f for f in files if args.force or f.stem not in done]
     log(f"found {len(files)} audio file(s), {len(pending)} to transcribe")
     for f in files:
         if f not in pending:
@@ -251,7 +255,7 @@ def main():
         log(f"=== [{i}/{len(pending)}] {path.name}")
         try:
             transcribe(
-                asr, path, outdir, args.language, args.beams,
+                asr, path, inbox, args.language, args.beams,
                 args.mode, args.no_speech_threshold, args.collapse_repeats,
             )
         except Exception as exc:  # keep going so one bad file cannot stop the batch
