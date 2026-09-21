@@ -60,6 +60,26 @@ services:
       start_period: 300s   # 최초 기동은 모델 3GB 내려받기를 포함할 수 있다
       retries: 3
 
+  # 웹 UI. 전사는 하지 않고 api 를 HTTP 로 부르기만 한다.
+  #   docker compose up -d ui
+  #
+  # GPU 도 torch 도 쓰지 않으므로 x-gpu 를 붙이지 않는다. 이미지도 따로다.
+  ui:
+    build: ./ui
+    image: stt-gradio-ui
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${STT_UI_BIND:-127.0.0.1}:${STT_UI_PORT:-17861}:7860"
+    environment:
+      # compose 네트워크 안에서 서비스명으로 부른다. 이 덕분에 api 를 바깥으로
+      # 전혀 열지 않고 UI 만 공개하는 구성도 가능하다.
+      STT_API_URL: "http://api:17860"
+      STT_API_TOKEN: "${STT_API_TOKEN:-}"
+      # "user:pass,user2:pass2". 비우면 로그인 없이 누구나 쓸 수 있다.
+      STT_UI_USERS: "${STT_UI_USERS:-}"
+
 volumes:
   hf-cache:   # 모델 가중치 캐시. 두 서비스가 공유한다
   api-data:   # API 의 job 기록과 업로드 임시 파일
