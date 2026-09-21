@@ -1,0 +1,113 @@
+# 환경 확인 파이프라인.
+#
+# 배포 파이프라인을 붙이기 전에, 러너가 올라가 있는 호스트가 정말 그 GPU 서버인지와
+# 빌드·배포에 필요한 것이 갖춰져 있는지부터 확정한다. GitLab 쪽에서는 이 러너의 IP가
+# 기존 stg-runner 와 같게 보여서 구분되지 않는다.
+#
+# 잡은 docker:24-cli 컨테이너 안에서 돈다. 그래서 세 가지를 조심해야 한다.
+#   - hostname 을 그냥 부르면 잡 컨테이너의 ID 가 나온다. 호스트를 알려면
+#     docker.sock 너머의 데몬에게 물어야 한다 (docker info).
+#   - nvidia-smi 는 잡 컨테이너에 없다. --gpus 를 준 별도 컨테이너를 띄워야 한다.
+#   - 127.0.0.1 은 잡 컨테이너 자신이지 호스트가 아니다.
+
+stages:
+  - verify
+
+variables:
+  # 점검용 임시 컨테이너에 쓸 이미지. 이걸 받을 수 있는지가 Docker Hub 접근 테스트를 겸한다.
+  PROBE_IMAGE: "ubuntu:22.04"
+
+환경확인:
+  stage: verify
+  tags: [stt-gpu]              # gpu-server-stt 러너에서만 실행
+  image: docker:24-cli         # docker / docker compose / git 포함 (확인함)
+  script:
+    - |
+      echo "══════════ 1. 러너가 올라가 있는 호스트 ══════════"
+      # 컨테이너가 아니라 데몬에게 묻는다. 데몬은 호스트에서 돌고 있다.
+      docker info --format '  hostname    : {{.Name}}'
+      docker info --format '  docker      : {{.ServerVersion}}'
+      docker info --format '  OS          : {{.OperatingSystem}} / {{.Architecture}}'
+      docker info --format '  CPU         : {{.NCPU}} cores'
+      docker info --format '  MEM(bytes)  : {{.MemTotal}}'
+      docker info --format '  런타임      : {{range $k, $v := .Runtimes}}{{$k}} {{end}}'
+      docker info --format '  docker root : {{.DockerRootDir}}'
+
+    - |
+      echo ""
+      echo "══════════ 2. Docker Hub 접근 ══════════"
+      # /v2/ 는 인증 없이 401 을 주므로 wget 으로는 판정할 수 없다. 실제로 받아 본다.
+      if docker pull -q "$PROBE_IMAGE" >/dev/null 2>&1; then
+        echo "  OK    $PROBE_IMAGE 받기 성공 — 빌드 시 python:3.12-slim 도 받을 수 있다"
+      else
+        echo "  막힘  $PROBE_IMAGE 를 받지 못했다."
+        echo "        서버에서 docker build 가 불가능하다. 이미지를 외부에서 만들어"
+        echo "        사내 레지스트리(gitlab.chemtopia.net:5555)로 넣는 방식으로 바꿔야 한다."
+        exit 1
+      fi
+
+    - |
+      echo ""
+      echo "══════════ 3. GPU ══════════"
+      if docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -q nvidia; then
+        echo "  nvidia 런타임 등록됨"
+        echo ""
+        echo "  ── 인덱스별 목록 (STT_GPU 값을 여기서 확정한다) ──"
+        # --gpus 를 주면 NVIDIA Container Toolkit 이 nvidia-smi 를 컨테이너에 넣어 준다.
+        docker run --rm --gpus all "$PROBE_IMAGE" \
+          nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
+                     --format=csv || echo "  !! GPU 조회 실패 — 드라이버/toolkit 확인 필요"
+      else
+        echo "  !! nvidia 런타임이 없다. NVIDIA Container Toolkit 설치가 필요하다."
+        echo "     이대로면 api 가 CPU 로 떨어져 실사용이 불가능하다."
+      fi
+
+    - |
+      echo ""
+      echo "══════════ 4. 빌드에 필요한 바깥 네트워크 ══════════"
+      wget -q --spider --timeout=10 https://download.pytorch.org/whl/cu128/ \
+        && echo "  OK    PyTorch cu128 휠 (약 2.5GB)" \
+        || echo "  막힘  download.pytorch.org — 이미지 빌드가 실패한다"
+      wget -q --spider --timeout=10 https://huggingface.co/ \
+        && echo "  OK    huggingface.co (모델 약 3GB)" \
+        || echo "  막힘  huggingface.co — 모델을 받지 못해 첫 기동이 실패한다"
+
+    - |
+      echo ""
+      echo "══════════ 5. 디스크 ══════════"
+      echo "  (이미지 12.6GB + 빌드 캐시 + 모델 3GB. 30GB 이상 여유 권장)"
+      ROOT=$(docker info --format '{{.DockerRootDir}}')
+      docker run --rm -v /:/host:ro "$PROBE_IMAGE" df -h "/host${ROOT}" 2>/dev/null \
+        || docker run --rm -v /:/host:ro "$PROBE_IMAGE" df -h /host
+      echo ""
+      echo "  ── docker 가 이미 쓰고 있는 용량 ──"
+      docker system df
+
+    - |
+      echo ""
+      echo "══════════ 6. 기존 stt 스택 ══════════"
+      # 손으로 띄워 둔 것이 있으면 배포가 그대로 인수한다.
+      # compose 프로젝트 이름(-p stt)이 같아야 같은 컨테이너·볼륨을 이어받는다.
+      echo "  ── 컨테이너 ──"
+      docker compose -p stt ps 2>/dev/null || echo "     (없음 — 이번이 첫 배포가 된다)"
+      echo "  ── 볼륨 ──"
+      docker volume ls --filter name=stt --format '     {{.Name}}'
+      echo "  ── 이미지 ──"
+      docker images --filter reference='stt-*' --format '     {{.Repository}}:{{.Tag}}  {{.Size}}'
+
+    - |
+      echo ""
+      echo "══════════ 7. 포트 ══════════"
+      # 17860 / 17861 을 다른 것이 쓰고 있으면 배포가 실패한다.
+      # --network host 로 호스트의 포트 상태를 본다 (잡 컨테이너 자신이 아니라).
+      # ubuntu 에는 ss/netstat 이 없다. busybox(4MB)에는 netstat 이 들어 있다.
+      docker run --rm --network host busybox \
+        sh -c 'netstat -ltn 2>/dev/null | grep -E ":(17860|17861) " \
+               || echo "     17860 / 17861 을 쓰는 것 없음"'
+
+    - |
+      echo ""
+      echo "══════════ 확인할 것 ══════════"
+      echo "  · 1번의 hostname 이 배포하려는 그 GPU 서버가 맞는가"
+      echo "  · 3번에서 RTX 3080 이 7장 보이는가, STT_GPU 로 쓸 인덱스는 몇 번인가"
+      echo "  · 2·4번이 전부 OK 인가 (하나라도 막히면 서버 빌드가 불가능하다)"
