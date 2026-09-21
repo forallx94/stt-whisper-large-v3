@@ -66,6 +66,71 @@ docker compose run --rm stt --help
 docker compose run --rm stt --only interview --language en --mode chunked
 ```
 
+## HTTP API
+
+배치 실행 말고 **상주 서버**로도 쓸 수 있습니다. 모델을 한 번만 올려 두고 업로드를 받으므로,
+파일 하나씩 산발적으로 처리할 때 매번 3GB를 다시 읽지 않습니다.
+
+```powershell
+copy .env.example .env      # 토큰·공개범위·보존기한 설정
+docker compose up -d api
+```
+
+브라우저에서 `http://localhost:17860/docs` 를 열면 스키마와 시험용 폼이 나옵니다.
+
+### 쓰는 법
+
+긴 녹음은 수십 분이 걸려 동기 응답이 불가능합니다. 업로드하면 `job_id` 가 돌아오고,
+그걸로 진행률을 확인한 뒤 결과를 가져갑니다.
+
+```bash
+# 1. 올린다
+curl -X POST http://localhost:17860/jobs -F "file=@회의.m4a"
+# → {"id":"a1b2...", "status":"queued", "queue_position":2, "estimated_seconds":740.5, ...}
+
+# 2. 확인한다
+curl http://localhost:17860/jobs/a1b2...
+# → {"status":"running", "progress":{"done":41,"total":88,"fraction":0.466,"eta":612.3}, ...}
+
+# 3. 가져간다
+curl http://localhost:17860/jobs/a1b2...            # JSON (소수점 타임스탬프 포함)
+curl http://localhost:17860/jobs/a1b2.../text       # CLI 의 <이름>.txt 와 같은 내용
+curl http://localhost:17860/jobs/a1b2.../segments   # CLI 의 <이름>.segments.txt 와 같은 내용
+```
+
+`STT_API_TOKEN` 을 설정했다면 모든 요청에 `-H "Authorization: Bearer <토큰>"` 이 필요합니다
+(`/healthz` 는 모니터링용이라 예외).
+
+| 엔드포인트 | 설명 |
+| --- | --- |
+| `POST /jobs` | 업로드 → job 생성. 폼 필드로 `language` `mode` `beams` `no_speech_threshold` `collapse_repeats` `force` |
+| `GET /jobs` | 최근 목록 (결과 본문 제외) |
+| `GET /jobs/{id}` | 상태·진행률·대기순번·예상시간·결과 |
+| `GET /jobs/{id}/text` | 타임스탬프 없는 전문 |
+| `GET /jobs/{id}/segments` | 타임스탬프 포함 전문 |
+| `DELETE /jobs/{id}` | job 과 결과 삭제 |
+| `GET /healthz` | 모델 적재 여부, 큐 길이, 실시간 배속 |
+
+### 알아 둘 것
+
+- **작업은 차례로 처리됩니다.** GPU가 한 장인 것도 있지만, 진행률 계측이 모델 메서드를
+  교체하는 방식이라 동시 실행이 애초에 불가능합니다. 워커는 하나뿐이고 나머지는 큐에서 기다립니다.
+- **같은 파일을 같은 옵션으로 다시 올리면 전사하지 않고 기존 결과를 돌려줍니다.** 파일명이
+  아니라 내용 해시로 판정하므로, 이름이 달라도 같은 녹음이면 GPU를 다시 쓰지 않습니다.
+  무시하려면 `force=true`.
+- **JSON 결과의 타임스탬프는 초 단위 실수입니다.** txt 로 받으면 `hh:mm:ss` 로 잘립니다.
+- **업로드 원본은 전사 직후 삭제됩니다.** job 기록과 결과는 `STT_RETENTION_DAYS`(기본 7일)
+  뒤에 자동으로 지워집니다.
+- **기본 공개 범위는 그 서버 자신뿐입니다.** `STT_BIND=127.0.0.1` 로 묶여 있어 다른 PC 에서
+  `http://<서버IP>:<포트>` 로 접속하면 연결이 거부됩니다. 사내에 열려면 `.env` 에서
+  `STT_BIND=0.0.0.0` 으로 바꾸고 포트를 `STT_HOST_PORT` 로 정하십시오.
+- **여는 순간 반드시 토큰을 설정하십시오.** 지금 구조에는 사용자별 격리가 없습니다.
+  토큰을 가진 사람은 `GET /jobs` 로 **남이 올린 전사본 목록까지 전부** 볼 수 있습니다.
+  회의·면담 녹음이 오가는 서비스라 이 점을 먼저 합의하고 여는 편이 좋습니다.
+- **GPU 를 고를 수 있습니다.** `.env` 의 `STT_GPU` 에 장치 번호를 씁니다. 인덱스는 0부터라
+  7장짜리 장비의 "7번째"는 `6` 입니다.
+- **재시작하면 진행 중이던 작업은 실패로 표시됩니다.** 완료된 결과는 볼륨에 남아 유지됩니다.
+
 ## 결과 검증
 
 긴 녹음은 조용히 실패할 수 있습니다. 두 가지만 확인하면 아래 두 실패를 잡을 수 있습니다.
@@ -93,10 +158,18 @@ whisper-large-v3 모델 카드는 long-form 전사에 `condition_on_prev_tokens=
 
 ## 구성
 
+- `app/core.py` — 전사 엔진. 화면에 출력하지도, 파일을 만들지도 않고 결과를 값으로
+  돌려줍니다. 모델 카드에서 벗어난 튜닝값이 전부 여기 한 곳에 있습니다.
+- `app/cli.py` — 배치 실행기. 폴더 스캔, 중복 판정, txt 저장, 진행률 표시처럼
+  "부르는 쪽"의 몫만 맡습니다.
+- `app/server.py` — HTTP API. 같은 core를 쓰되 업로드로 받고 JSON으로 돌려줍니다.
+  두 진입점이 엔진을 공유하므로 CLI로 돌린 결과와 API로 돌린 결과가 같습니다.
 - `Dockerfile` — python:3.12-slim + ffmpeg + PyTorch 2.8.0 **cu128**.
   RTX 50 시리즈(Blackwell, sm_120)는 CUDA 12.8 휠이 필요하므로 이 버전을 고정했습니다.
-- `docker-compose.yml` — `input/` 을 `/audio`(읽기 전용), `output/` 을 `/output` 으로 마운트하고
-  GPU 전체를 컨테이너에 전달합니다. `app/` 도 마운트되므로 스크립트를 고쳐도 재빌드가 필요 없습니다.
+- `docker-compose.yml` — 서비스 둘. `stt`(배치)는 `input/`·`output/` 과 `app/` 을 마운트해
+  스크립트를 고쳐도 재빌드가 필요 없고, `api`(상주)는 재현성을 위해 `app/` 을 마운트하지
+  않습니다. 두 서비스 모두 `STT_GPU` 로 지정한 GPU 한 장만 컨테이너에 넘깁니다.
+- `.env.example` — `api` 서비스 설정. `.env` 로 복사해 씁니다(`.env` 는 커밋되지 않습니다).
 - 모델 가중치는 `hf-cache` 볼륨에 캐시되어 최초 실행에서만 내려받습니다.
 
 ## 참고

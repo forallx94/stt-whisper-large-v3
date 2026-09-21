@@ -14,3 +14,6 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# API 설정(토큰 포함). .env.example 을 복사해서 만든다.
+/.env

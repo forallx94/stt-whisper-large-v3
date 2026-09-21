@@ -14,10 +14,10 @@ RUN pip install --no-cache-dir \
 COPY app/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY app/transcribe.py /app/transcribe.py
+COPY app/ /app/
 
 ENV HF_HOME=/cache/huggingface \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-ENTRYPOINT ["python", "/app/transcribe.py"]
+ENTRYPOINT ["python", "/app/cli.py"]

@@ -1,19 +1,65 @@
+# 컨테이너에 넘길 GPU. STT_GPU 로 장치 번호를 고른다.
+#   - 인덱스는 0부터다. RTX 3080 7장이면 0~6 이고, "7번째"는 6 이다.
+#   - 한 장만 넘기면 컨테이너 안에서는 그게 cuda:0 으로 보인다. 코드는 건드릴 필요가 없다.
+#   - 여러 장을 넘기려면 ["4","5","6"] 처럼 쓰고, 쓸 장치를 STT_DEVICE=cuda:2 로 고른다.
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${STT_GPU:-0}"]
+            capabilities: [gpu]
+
 services:
+  # 일회성 배치. input/ 을 훑어 output/ 에 txt 를 쓰고 끝난다.
+  #   docker compose run --rm stt
   stt:
+    <<: *gpu
     build: .
     image: stt-whisper-large-v3
     volumes:
+      # 개발 편의를 위해 코드를 마운트한다. 고쳐도 재빌드가 필요 없다.
       - ./app:/app:ro
       - ./input:/audio:ro
       - ./output:/output
       - hf-cache:/cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+
+  # 상주 HTTP API. 모델을 한 번만 올려 두고 업로드를 큐로 받는다.
+  #   docker compose up -d api
+  api:
+    <<: *gpu
+    build: .
+    image: stt-whisper-large-v3
+    entrypoint: ["python", "/app/server.py"]
+    restart: unless-stopped
+    ports:
+      # <바인딩 주소>:<호스트 포트>:<컨테이너 포트>
+      #
+      # STT_BIND 가 핵심이다. 기본값 127.0.0.1 은 이 서버 자신에서만 접속할 수 있다는
+      # 뜻이고, 다른 PC 에서 http://<서버IP>:<포트> 로 접속하면 연결이 거부된다.
+      # 사내에 열려면 STT_BIND=0.0.0.0 으로 바꿔야 하며, 그때는 STT_API_TOKEN 을
+      # 반드시 함께 설정한다 (토큰이 없으면 망 안의 누구나 전사본을 전부 볼 수 있다).
+      - "${STT_BIND:-127.0.0.1}:${STT_HOST_PORT:-17860}:17860"
+    environment:
+      STT_API_TOKEN: "${STT_API_TOKEN:-}"
+      STT_RETENTION_DAYS: "${STT_RETENTION_DAYS:-7}"
+      STT_MAX_UPLOAD_MB: "${STT_MAX_UPLOAD_MB:-1024}"
+      STT_MODEL: "${STT_MODEL:-openai/whisper-large-v3}"
+      STT_DEVICE: "${STT_DEVICE:-}"
+    volumes:
+      # app/ 을 마운트하지 않는다. 이미지에 박힌 코드로만 돌려야 어느 버전이
+      # 돌고 있는지 git 으로 확인할 수 있다. 코드를 고쳤으면 build 후 up 한다.
+      - api-data:/data
+      - hf-cache:/cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:17860/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s   # 최초 기동은 모델 3GB 내려받기를 포함할 수 있다
+      retries: 3
 
 volumes:
-  hf-cache:
+  hf-cache:   # 모델 가중치 캐시. 두 서비스가 공유한다
+  api-data:   # API 의 job 기록과 업로드 임시 파일
