@@ -47,6 +47,9 @@ services:
       STT_MAX_UPLOAD_MB: "${STT_MAX_UPLOAD_MB:-1024}"
       STT_MODEL: "${STT_MODEL:-openai/whisper-large-v3}"
       STT_DEVICE: "${STT_DEVICE:-}"
+      # chunked 모드의 창 배치 크기. VRAM 이 작은 카드(예: 3080 10GB)에서는
+      # 기본값 8 이 OOM 을 낼 수 있어 밖에서 조절할 수 있게 둔다.
+      STT_BATCH_SIZE: "${STT_BATCH_SIZE:-8}"
     volumes:
       # app/ 을 마운트하지 않는다. 이미지에 박힌 코드로만 돌려야 어느 버전이
       # 돌고 있는지 git 으로 확인할 수 있다. 코드를 고쳤으면 build 후 up 한다.

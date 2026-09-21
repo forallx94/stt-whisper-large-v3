@@ -12,6 +12,7 @@
 
 stages:
   - verify
+  - deploy
 
 variables:
   # 점검용 임시 컨테이너에 쓸 이미지. 이걸 받을 수 있는지가 Docker Hub 접근 테스트를 겸한다.
@@ -21,6 +22,9 @@ variables:
   stage: verify
   tags: [stt-gpu]              # gpu-server-stt 러너에서만 실행
   image: docker:24-cli         # docker / docker compose / git 포함 (확인함)
+  # 매 푸시마다 돌 필요는 없다. 필요할 때 버튼으로 돌린다.
+  when: manual
+  allow_failure: true
   script:
     - |
       echo "══════════ 1. 러너가 올라가 있는 호스트 ══════════"
@@ -111,3 +115,34 @@ variables:
       echo "  · 1번의 hostname 이 배포하려는 그 GPU 서버가 맞는가"
       echo "  · 3번에서 RTX 3080 이 7장 보이는가, STT_GPU 로 쓸 인덱스는 몇 번인가"
       echo "  · 2·4번이 전부 OK 인가 (하나라도 막히면 서버 빌드가 불가능하다)"
+
+배포:
+  stage: deploy
+  tags: [stt-gpu]
+  image: docker:24-cli
+  # 손으로 눌러야 실행된다. 자동으로 두지 않는 이유:
+  #   server.py 는 재시작하면 진행 중이던 전사를 버린다. 푸시할 때마다 컨테이너가
+  #   교체되면 남의 1시간 40분짜리 회의가 날아간다. deploy.sh 의 drain 이 그걸
+  #   막아 주지만, 언제 반영할지는 사람이 정하는 편이 안전하다.
+  #   (그리고 아직 자동 테스트가 없다. 테스트가 붙으면 자동화를 다시 검토한다.)
+  #
+  # when 은 rules 안에 쓴다. 잡 레벨 when 은 rules 가 있으면 해석이 모호해지므로
+  # 규칙 안에 명시해 "main 에서만, 수동으로"를 한 줄로 못 박는다.
+  #
+  # main 에서만 도는 이유: protected 변수(토큰 등)는 보호된 브랜치에서만 주입된다.
+  # 다른 브랜치에서 돌면 .env 가 빈 값으로 만들어진다.
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+      # 수동 잡은 기본적으로 실패해도 파이프라인이 성공으로 표시된다.
+      # 배포가 실패했는데 초록불이면 안 되므로 끈다.
+      allow_failure: false
+  # 배포 중에 다음 파이프라인이 끼어들어 같은 스택을 동시에 건드리지 않게 한다.
+  resource_group: production
+  # 첫 배포는 cu128 휠 2.5GB + 모델 3GB 를 받는다. 기본 1시간으로는 모자랄 수 있다.
+  timeout: 3h
+  environment:
+    name: production
+    url: http://gpu02:17860/healthz
+  script:
+    - sh scripts/deploy.sh
